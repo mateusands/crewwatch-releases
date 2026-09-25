@@ -1,0 +1,130 @@
+name: Release
+
+# Builds a CrewWatch release from a tag of the private source repository (mateusands/crewkit) and
+# publishes it here, where the installed app's updater reads it. Actions minutes are free in a
+# public repository, macOS included, so the build runs here rather than there.
+#
+# Each machine runs the source's own ide/scripts/release.sh, the same one a person runs by hand:
+# it checks the tag and the signing key, builds, signs, merges its platforms into latest.json and
+# uploads. The machines run one after another, since each adds its part to the same latest.json.
+#
+#   gh workflow run release.yml -R mateusands/crewwatch-releases -f tag=v2.7.0
+#
+# Secrets:
+#   CREWKIT_DEPLOY_KEY          a read-only deploy key of mateusands/crewkit (SSH private key)
+#   TAURI_SIGNING_PRIVATE_KEY   the updater key whose public half is plugins.updater.pubkey in the
+#                               source's tauri.conf.json; release.sh refuses any other
+#
+# The build log is public: file names and compiler messages show, the source itself does not.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The source repository's tag to build, e.g. v2.7.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag }}
+  ZIG_VERSION: 0.16.0
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  linux:
+    name: Linux x86_64
+    # The oldest supported Ubuntu: an AppImage runs on systems at least as new as the one it was
+    # built on.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: mateusands/crewkit
+          ref: ${{ env.TAG }}
+          ssh-key: ${{ secrets.CREWKIT_DEPLOY_KEY }}
+          # The packaging scripts refuse a shallow clone: the app embeds the kit's history.
+          fetch-depth: 0
+      - name: Tauri system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf file xdg-utils
+      - name: Rust toolchain
+        run: rustup toolchain install
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ide/package-lock.json
+      - name: npm ci
+        working-directory: ide
+        run: npm ci --no-audit --no-fund
+      - name: The signing key, as a file release.sh reads
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s' "$KEY" > "$RUNNER_TEMP/updater.key"
+      - name: release.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREWWATCH_UPDATER_KEY: ${{ runner.temp }}/updater.key
+        run: bash ide/scripts/release.sh
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      # One after another: each merges its platforms into the latest.json the one before uploaded.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x86_64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: mateusands/crewkit
+          ref: ${{ env.TAG }}
+          ssh-key: ${{ secrets.CREWKIT_DEPLOY_KEY }}
+          fetch-depth: 0
+      - name: Rust toolchain
+        run: rustup toolchain install
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ide/package-lock.json
+      - name: npm ci
+        working-directory: ide
+        run: npm ci --no-audit --no-fund
+      - name: The signing key, as a file release.sh reads
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s' "$KEY" > "$RUNNER_TEMP/updater.key"
+      - name: release.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREWWATCH_UPDATER_KEY: ${{ runner.temp }}/updater.key
+        run: bash ide/scripts/release.sh
