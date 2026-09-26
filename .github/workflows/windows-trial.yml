@@ -1,0 +1,64 @@
+name: Windows trial
+
+# Builds the Windows installer from a ref of the source repository and keeps it as a workflow
+# artifact, not a release: nothing had built CrewWatch on Windows before, and a package goes into
+# latest.json, where every installed updater reads it, only after one has been installed and used
+# on a Windows machine.
+#
+#   gh workflow run windows-trial.yml -R mateusands/crewwatch-releases -f ref=feat/windows-package
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "The source repository's branch, tag or commit to build"
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.16.0
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          repository: mateusands/crewkit
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.CREWKIT_DEPLOY_KEY }}
+          # Its own folder, as in release.yml: setup-zig's cache must not land inside the source.
+          path: source
+          fetch-depth: 0
+      - name: Rust toolchain
+        working-directory: source
+        run: rustup toolchain install
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: source/ide/package-lock.json
+      - name: npm ci
+        working-directory: source/ide
+        run: npm ci --no-audit --no-fund
+      - name: package-windows.sh
+        run: bash source/ide/scripts/package-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crewwatch-windows-trial
+          path: source/ide/src-tauri/target/package/release/bundle/nsis/*.exe
+          if-no-files-found: error
