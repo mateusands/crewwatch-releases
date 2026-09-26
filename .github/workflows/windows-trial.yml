@@ -56,9 +56,16 @@ jobs:
         working-directory: source/ide
         run: npm ci --no-audit --no-fund
       - name: package-windows.sh
+        # The bundle carries updater artifacts (createUpdaterArtifacts), which Tauri signs as it
+        # builds; the release key signs the trial too, so a trial that works is what a release ships.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: bash source/ide/scripts/package-windows.sh
       - uses: actions/upload-artifact@v4
         with:
           name: crewwatch-windows-trial
-          path: source/ide/src-tauri/target/package/release/bundle/nsis/*.exe
+          path: |
+            source/ide/src-tauri/target/package/release/bundle/nsis/*.exe
+            source/ide/src-tauri/target/package/release/bundle/nsis/*.sig
           if-no-files-found: error
